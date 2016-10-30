@@ -406,6 +406,11 @@ static void conn_init(void) {
 
     close(next_fd);
 
+    /* 这里没有真正的申请connection结构
+     * 避免并发数量远小于max_fds时的内存浪费.
+     * 申请了max个结构体指针，
+     * 后续可以通过fd直接索引到connection结构，提高访问速度。
+     */
     if ((conns = calloc(max_fds, sizeof(conn *))) == NULL) {
         fprintf(stderr, "Failed to allocate connection structures\n");
         /* This is unrecoverable so bail out early. */
@@ -4527,9 +4532,12 @@ static void drive_machine(conn *c) {
 
     while (!stop) {
 
+        /* 每个case封装成一个函数 */
         switch(c->state) {
+        /* 主线程处理新连接 */
         case conn_listening:
             addrlen = sizeof(addr);
+            /* accept 新连接 */
 #ifdef HAVE_ACCEPT4
             if (use_accept4) {
                 sfd = accept4(c->sfd, (struct sockaddr *)&addr, &addrlen, SOCK_NONBLOCK);
@@ -4576,6 +4584,7 @@ static void drive_machine(conn *c) {
                 stats.rejected_conns++;
                 STATS_UNLOCK();
             } else {
+                /* 将新连接分发给worker线程 */
                 dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST,
                                      DATA_BUFFER_SIZE, c->transport);
             }
@@ -4622,6 +4631,7 @@ static void drive_machine(conn *c) {
 
             break;
 
+        /* worker接收命令 */
         case conn_new_cmd:
             /* Only process nreqs at a time to avoid starving other
                connections */
@@ -4971,6 +4981,7 @@ static int server_socket(const char *interface,
 
     for (next= ai; next; next= next->ai_next) {
         conn *listen_conn_add;
+        /* socket() */
         if ((sfd = new_socket(next)) == -1) {
             /* getaddrinfo can return "junk" addresses,
              * we make sure at least one works before erroring.
@@ -5011,6 +5022,7 @@ static int server_socket(const char *interface,
                 perror("setsockopt");
         }
 
+        /* bind() */
         if (bind(sfd, next->ai_addr, next->ai_addrlen) == -1) {
             if (errno != EADDRINUSE) {
                 perror("bind()");
@@ -5022,6 +5034,7 @@ static int server_socket(const char *interface,
             continue;
         } else {
             success++;
+            /* listen() */
             if (!IS_UDP(transport) && listen(sfd, settings.backlog) == -1) {
                 perror("listen()");
                 close(sfd);
@@ -5068,6 +5081,8 @@ static int server_socket(const char *interface,
                                   UDP_READ_BUFFER_SIZE, transport);
             }
         } else {
+            /* 创建connection结构体，state为listening 
+             * 加入epoll */
             if (!(listen_conn_add = conn_new(sfd, conn_listening,
                                              EV_READ | EV_PERSIST, 1,
                                              transport, main_base))) {
@@ -5087,6 +5102,7 @@ static int server_socket(const char *interface,
 
 static int server_sockets(int port, enum network_transport transport,
                           FILE *portnumber_file) {
+    /* 应该是interface */
     if (settings.inter == NULL) {
         return server_socket(settings.inter, port, transport, portnumber_file);
     } else {
@@ -6264,6 +6280,7 @@ int main (int argc, char **argv) {
     }
 
     /* Initialize Sasl if -S was specified */
+    /* Q: sasl 是什么 */
     if (settings.sasl) {
         init_sasl();
     }
@@ -6283,6 +6300,10 @@ int main (int argc, char **argv) {
     /* lock paged memory if needed */
     if (lock_memory) {
 #ifdef HAVE_MLOCKALL
+        /* mlockall
+         * 将进程使用的部分或者全部的地址空间锁定在物理内存中，防止其被交换到swap空间。
+         * 有些对时间敏感的应用会希望全部使用物理内存，以提高数据访问和操作的效率。
+         * */
         int res = mlockall(MCL_CURRENT | MCL_FUTURE);
         if (res != 0) {
             fprintf(stderr, "warning: -k invalid, mlockall() failed: %s\n",
@@ -6296,6 +6317,7 @@ int main (int argc, char **argv) {
     /* initialize main thread libevent instance */
     main_base = event_init();
 
+    /* Q: init没有返回值，不会失败吗 */
     /* initialize other stuff */
     logger_init();
     stats_init();
@@ -6308,32 +6330,40 @@ int main (int argc, char **argv) {
      * ignore SIGPIPE signals; we can use errno == EPIPE if we
      * need that information
      */
+    /* Q: 为啥不放在init的前面 */
     if (sigignore(SIGPIPE) == -1) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EX_OSERR);
     }
+
+    /* 启动worker线程 */
     /* start up worker threads if MT mode */
     memcached_thread_init(settings.num_threads);
 
+    /* 启动assoc线程 */
     if (start_assoc_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }
 
+    /* 启动crawler线程 */
     if (start_lru_crawler && start_item_crawler_thread() != 0) {
         fprintf(stderr, "Failed to enable LRU crawler thread\n");
         exit(EXIT_FAILURE);
     }
 
+    /* 启动lru线程 */
     if (start_lru_maintainer && start_lru_maintainer_thread() != 0) {
         fprintf(stderr, "Failed to enable LRU maintainer thread\n");
         return 1;
     }
 
+    /* 启动slab线程 */
     if (settings.slab_reassign &&
         start_slab_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }
 
+    /* 启动conn_timeout线程 */
     if (settings.idle_timeout && start_conn_timeout_thread() == -1) {
         exit(EXIT_FAILURE);
     }
@@ -6372,6 +6402,7 @@ int main (int argc, char **argv) {
         }
 
         errno = 0;
+        /* create the TCP listening socket and bind it */
         if (settings.port && server_sockets(settings.port, tcp_transport,
                                            portnumber_file)) {
             vperror("failed to listen on TCP port %d", settings.port);

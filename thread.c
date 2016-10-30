@@ -325,12 +325,14 @@ void accept_new_conns(const bool do_accept) {
  * Set up a thread's information.
  */
 static void setup_thread(LIBEVENT_THREAD *me) {
+    /* 每个worker线程创建独立的epoll */
     me->base = event_init();
     if (! me->base) {
         fprintf(stderr, "Can't allocate event base\n");
         exit(1);
     }
 
+    /* 将线程通信fd加入epoll,挂载处理函数thread_libevent_process */
     /* Listen for notifications from other threads */
     event_set(&me->notify_event, me->notify_receive_fd,
               EV_READ | EV_PERSIST, thread_libevent_process, me);
@@ -392,6 +394,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     char buf[1];
     unsigned int timeout_fd;
 
+    /* 读出trigger消息 */
     if (read(fd, buf, 1) != 1) {
         if (settings.verbose > 0)
             fprintf(stderr, "Can't read from libevent pipe\n");
@@ -399,10 +402,12 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     }
 
     switch (buf[0]) {
+    /* 新连接消息 */
     case 'c':
         item = cq_pop(me->new_conn_queue);
 
         if (NULL != item) {
+            /* 创建connection结构, 状态conn_new_cmd */
             conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
                                item->read_buffer_size, item->transport,
                                me->base);
@@ -466,6 +471,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
         return ;
     }
 
+    /* round robin负载算法 */
     int tid = (last_thread + 1) % settings.num_threads;
 
     LIBEVENT_THREAD *thread = threads + tid;
@@ -478,8 +484,10 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
     item->read_buffer_size = read_buffer_size;
     item->transport = transport;
 
+    /* Adds an item to worker connection queue. */
     cq_push(thread->new_conn_queue, item);
 
+    /* 写一个消息触发worker接收item */
     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
     buf[0] = 'c';
     if (write(thread->notify_send_fd, buf, 1) != 1) {

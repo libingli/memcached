@@ -46,6 +46,7 @@ int daemonize(int nochdir, int noclose)
     int fd;
 
     switch (fork()) {
+    /* 父进程退出 */
     case -1:
         return (-1);
     case 0:
@@ -54,6 +55,7 @@ int daemonize(int nochdir, int noclose)
         _exit(EXIT_SUCCESS);
     }
 
+    /* setsid - run a program in a new session */
     if (setsid() == -1)
         return (-1);
 
